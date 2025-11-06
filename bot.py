@@ -2,25 +2,27 @@ import os
 import asyncio
 import logging
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 
-# Загружаем переменные окружения из .env (на локальном запуске)
+# Загружаем переменные окружения из .env (для локального запуска)
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("Не задан TELEGRAM_TOKEN. Укажи его в переменных окружения или файле .env")
+    raise ValueError("Не задан TELEGRAM_TOKEN. Укажи его в переменных окружения или в .env")
 
 if not OPENAI_API_KEY:
-    raise ValueError("Не задан OPENAI_API_KEY. Укажи его в переменных окружения или файле .env")
+    raise ValueError("Не задан OPENAI_API_KEY. Укажи его в переменных окружения или в .env")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
@@ -28,14 +30,43 @@ dp = Dispatcher()
 # Инициализируем клиента OpenAI
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Храним данные по пользователям в памяти:
+# URL, который Render подставляет автоматически (нужен для вебхука)
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+# Путь и полный URL вебхука
+WEBHOOK_PATH = f"/webhook/{TELEGRAM_TOKEN}"
+WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else None
+
+# ----- Память сессий -----
 # user_sessions = {
 #   user_id: {
-#       "model": "gpt-4o",
+#       "model": "gpt4o",
 #       "messages": [ {"role": "user"/"assistant", "content": "..."} ]
 #   }
 # }
+
 user_sessions = {}
+
+
+def get_user_session(user_id: int):
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "model": "gpt4o",   # модель по умолчанию
+            "messages": []
+        }
+    return user_sessions[user_id]
+
+
+def map_model_code_to_openai_id(model_code: str) -> str:
+    # Маппинг "красивых" названий на реальные ID моделей OpenAI
+    if model_code == "gpt5_instance":
+        return "gpt-4o-mini"   # условно "быстрая"
+    if model_code == "gpt5_syncing":
+        return "gpt-4.1"       # условно "глубокая"
+    if model_code == "gpt4o":
+        return "gpt-4o"
+    return "gpt-4o"
+
 
 # ----- Клавиатуры -----
 
@@ -47,6 +78,7 @@ def main_menu():
     kb.adjust(1)
     return kb.as_markup()
 
+
 def model_menu(current_model: str):
     kb = InlineKeyboardBuilder()
 
@@ -57,7 +89,6 @@ def model_menu(current_model: str):
     ]
 
     for title, code in models:
-        # помечаем активную модель галочкой
         label = f"✅ {title}" if code == current_model else title
         kb.button(text=label, callback_data=f"set_model:{code}")
 
@@ -65,36 +96,13 @@ def model_menu(current_model: str):
     kb.adjust(1)
     return kb.as_markup()
 
-# ----- Вспомогательные функции -----
-
-def get_user_session(user_id: int):
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "model": "gpt4o",   # по умолчанию GPT-4o
-            "messages": []
-        }
-    return user_sessions[user_id]
-
-def map_model_code_to_openai_id(model_code: str) -> str:
-    # Здесь мы сопоставляем красивые названия с реальными ID моделей OpenAI.
-    # При необходимости можешь заменить на актуальные.
-    if model_code == "gpt5_instance":
-        # условно "быстрая" модель
-        return "gpt-4o-mini"
-    if model_code == "gpt5_syncing":
-        # условно "глубокая"
-        return "gpt-4.1"
-    if model_code == "gpt4o":
-        return "gpt-4o"
-    # запасной вариант
-    return "gpt-4o"
 
 # ----- Обработчики -----
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    session = get_user_session(user_id)
+    get_user_session(user_id)
 
     text = (
         "Привет, я виртуальный помощник, написанный самим искусственным интеллектом 🤖 "
@@ -111,7 +119,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     session = get_user_session(user_id)
     data = callback.data or ""
 
-    # Открыть меню выбора модели
+    # Выбор модели
     if data == "change_model":
         await callback.message.edit_text(
             "Выбери модель для AistaiBot:",
@@ -120,7 +128,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # Новый чат — очищаем текущую историю, но сессия пользователя остаётся
+    # Новый чат
     if data == "new_chat":
         session["messages"] = []
         await callback.message.edit_text(
@@ -142,12 +150,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # Вернуться в главное меню
+    # Назад в меню
     if data == "back_to_menu":
-        await callback.message.edit_text(
-            "Главное меню:",
-            reply_markup=main_menu()
-        )
+        await callback.message.edit_text("Главное меню:", reply_markup=main_menu())
         await callback.answer()
         return
 
@@ -156,7 +161,6 @@ async def handle_callbacks(callback: types.CallbackQuery):
         _, model_code = data.split(":", 1)
         session["model"] = model_code
 
-        # Красивое имя для отображения
         name_map = {
             "gpt5_instance": "GPT-5 Instance",
             "gpt5_syncing": "GPT-5 Syncing",
@@ -171,12 +175,11 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    await callback.answer()  # на всякий случай
+    await callback.answer()
 
 
 @dp.message()
 async def handle_message(message: types.Message):
-    # Игнорируем служебные сообщения и пустой текст
     if not message.text:
         return
 
@@ -189,7 +192,7 @@ async def handle_message(message: types.Message):
     # Добавляем сообщение пользователя в историю
     session["messages"].append({"role": "user", "content": message.text})
 
-    # Ограничиваем длину истории (чтобы не раздувать и не тратить лишние токены)
+    # Ограничиваем длину истории (по количеству сообщений, а не символов)
     max_messages = 30
     if len(session["messages"]) > max_messages:
         session["messages"] = session["messages"][-max_messages:]
@@ -204,7 +207,7 @@ async def handle_message(message: types.Message):
     except Exception as e:
         logging.exception("Ошибка при запросе к OpenAI")
         answer = (
-             "⚠️ Произошла ошибка при обращении к модели.\n"
+            "⚠️ Произошла ошибка при обращении к модели.\n"
             "Проверь, что OpenAI API ключ и ID модели указаны верно."
         )
 
@@ -214,9 +217,38 @@ async def handle_message(message: types.Message):
     await message.answer(answer, reply_markup=main_menu())
 
 
+# ----- Webhook / запуск на Render -----
+
+async def on_startup(bot: Bot):
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    else:
+        logging.warning("RENDER_EXTERNAL_URL не задан, webhook не установлен.")
+
+
 async def main():
-    logging.info("AistaiBot запущен...")
-    await dp.start_polling(bot)
+    logging.info("AistaiBot запускается (webhook режим)...")
+
+    app = web.Application()
+
+    # Обработчик запросов от Telegram по пути WEBHOOK_PATH
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+
+    # Настраиваем приложение aiogram + webhook
+    setup_application(app, dp, bot=bot, on_startup=on_startup)
+
+    # Render передаёт порт через переменную PORT
+    port = int(os.getenv("PORT", "10000"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logging.info(f"AistaiBot запущен на порту {port}")
+    # Держим процесс живым
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
