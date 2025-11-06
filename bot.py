@@ -124,8 +124,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
     if data == "new_chat":
         session["messages"] = []
         await callback.message.edit_text(
-            "Начали новый чат 🧹
-Можешь задать первый вопрос.",
+            "Начали новый чат 🧹\nМожешь задать первый вопрос.",
             reply_markup=main_menu()
         )
         await callback.answer()
