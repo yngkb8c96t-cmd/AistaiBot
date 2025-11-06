@@ -204,9 +204,8 @@ async def handle_message(message: types.Message):
     except Exception as e:
         logging.exception("Ошибка при запросе к OpenAI")
         answer = (
-            "⚠️ Произошла ошибка при обращении к модели.
-"
-            "Проверь, что OpenAI API ключ и модель указаны верно."
+             "⚠️ Произошла ошибка при обращении к модели.\n"
+            "Проверь, что OpenAI API ключ и ID модели указаны верно."
         )
 
     # Сохраняем ответ ассистента в историю
