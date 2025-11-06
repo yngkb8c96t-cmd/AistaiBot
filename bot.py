@@ -232,11 +232,14 @@ async def main():
 
     app = web.Application()
 
+    # Регистрируем функцию on_startup как стартовый хук диспетчера
+    dp.startup.register(on_startup)
+
     # Обработчик запросов от Telegram по пути WEBHOOK_PATH
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
 
     # Настраиваем приложение aiogram + webhook
-    setup_application(app, dp, bot=bot, on_startup=on_startup)
+    setup_application(app, dp, bot=bot)
 
     # Render передаёт порт через переменную PORT
     port = int(os.getenv("PORT", "10000"))
@@ -247,7 +250,6 @@ async def main():
     await site.start()
 
     logging.info(f"AistaiBot запущен на порту {port}")
-    # Держим процесс живым
     await asyncio.Event().wait()
 
 
